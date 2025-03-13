@@ -6,7 +6,7 @@ By harnessing the knowledge and skills acquired through data mining course throu
 The significance of this project lies in its potential to influence road safety measures and inform more responsible driving. Accurate predictions regarding the risk and aftermath of traffic 
 collisions are crucial for implementing targeted preventive strategies, heightening public awareness, and refining emergency response protocols.
 
-### References
+## References
 
 "Motor Vehicle Collisions - Crashes." Data.gov, https://catalog.data.gov/dataset/motor-
 vehicle-collisions-crashes. Accessed: May 1, 2024.
