@@ -1,0 +1,377 @@
+---
+title: "Data 318: Final Project - Predicting Casualties in Traffic Crashes of New York City"
+author: "Ivana D, Bryan Z, Paula R"
+date: "2024-04-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("CRAN")
+library(hms)
+library(lubridate)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(e1071)
+library(textclean)
+library(MASS)
+library(stringr)
+library(fastDummies)
+library('pROC')
+
+# Data
+raw_data = read.csv('Crashes.csv', header = TRUE)
+#view(raw_data)
+```
+
+# Final Project: Final Project - Predicting Casualties in Traffic Crashes
+
+## Cleaning Data
+
+```{r}
+# I wanna change the format of my dates column from character to date, and from character in time to 
+raw_data$CRASH.DATE <- mdy(raw_data$CRASH.DATE) #gets the date format in the column
+
+raw_data$CRASH.TIME <- str_pad(raw_data$CRASH.TIME, width = 5, side = "left", pad = "0") #this adds the 0 in front of of the numbers -> 05:05
+raw_data$CRASH.TIME <- as_hms(paste0(raw_data$CRASH.TIME, ":00")) #this adds the :00 at the end so that it can be transformed into 05:05:00 since it is required for getting the time format in the column
+raw_data$CRASH.TIME <- as_hms(raw_data$CRASH.TIME) #gets the time format in the column
+
+#I wanna delete the empty ones in contributing factor 1 and vehicle type and number of people injured & killed and lat and long
+crashes <- raw_data %>%
+  filter(CONTRIBUTING.FACTOR.VEHICLE.1 != "" & !is.na(CONTRIBUTING.FACTOR.VEHICLE.1) & VEHICLE.TYPE.CODE.1 != "" & !is.na(VEHICLE.TYPE.CODE.1) & NUMBER.OF.PERSONS.INJURED != "" & !is.na(NUMBER.OF.PERSONS.INJURED) & NUMBER.OF.PERSONS.KILLED != "" & !is.na(NUMBER.OF.PERSONS.KILLED) & LONGITUDE != "" & !is.na(LONGITUDE) & LATITUDE != "" & !is.na(LATITUDE))
+
+# This is for checking if the rows with empty data points entries in two columns were deleted
+# dim(raw_data)  # Original data dimensions
+# dim(crashes)
+# view(crashes)
+
+# This is for checking dates count, range, structure of date, and check data
+# start_date <- min(raw_data$CRASH.DATE, na.rm = TRUE)
+# end_date <- max(raw_data$CRASH.DATE, na.rm = TRUE)
+# start_date
+# end_date
+#range(raw_data$CRASH.DATE)
+#str(raw_data$CRASH.DATE)
+# raw_data
+
+# ---------------------------------------------------------------- #
+
+# This is for when I display the dates as in the format MM-DD-YYYY
+#crashes$CRASH.DATE <- format(crashes$CRASH.DATE, "%m-%d-%Y")
+
+```
+
+```{r}
+# I am creating a stratified sample to make sure the sample I'm taking from the full dataset is representative, 
+# so that proportions are similar between the full dataset and the sampled dataset
+set.seed(123) # this will ensure that the numbers don't change every time I run the file
+
+crashes_sample <- crashes %>%
+  group_by(NUMBER.OF.PERSONS.INJURED, NUMBER.OF.PERSONS.KILLED, CONTRIBUTING.FACTOR.VEHICLE.1, VEHICLE.TYPE.CODE.1) %>%
+  sample_frac(100000 / nrow(crashes), replace = TRUE) %>%
+  ungroup()
+
+crashes_sample
+```
+
+### Polishing predictor variables
+
+```{r}
+# CRASH.DATE into season
+# Getting Function for Months
+get_season <- function(month) {
+  case_when(
+    month %in% 3:5 ~ "Spring",
+    month %in% 6:8 ~ "Summer",
+    month %in% 9:11 ~ "Fall",
+    TRUE ~ "Winter"
+  )}
+
+# Creating Month column with integers
+crashes_sample <- crashes_sample %>%
+  mutate(Month = as.integer(format(CRASH.DATE, "%m"))) 
+    
+# Creating column with season
+crashes_sample <- crashes_sample %>% 
+  mutate(SEASON = get_season(Month)) 
+
+# Deleting column of month in integer format, and relocate season column
+crashes_sample <- crashes_sample %>% 
+  dplyr::select(-Month) %>%  
+  relocate(SEASON, .after = CRASH.DATE)
+
+# CRASH.TIME into time_of_day
+# Getting Function for Times of Day
+get_time_of_day <- function(hour) {
+  case_when(
+    hour >= 5 & hour < 12  ~ "Morning",   
+    hour >= 12 & hour < 17 ~ "Afternoon", 
+    hour >= 17 & hour < 22 ~ "Night",   
+    TRUE                   ~ "WeeHours"      
+  )
+}
+
+# Creating Hour column with integers
+crashes_sample <- crashes_sample %>%
+  mutate(Hour = as.integer(substr(CRASH.TIME, 1, 2))) 
+
+# Creating column with TIMEOFDAY
+crashes_sample <- crashes_sample %>%
+  mutate(TIMEOFDAY = get_time_of_day(Hour)) 
+
+# Deleting column of Hour in integer format, and relocate TIMEOFDAY column
+crashes_sample <- crashes_sample %>%
+  dplyr::select(-Hour) %>%  
+  relocate(TIMEOFDAY, .after = CRASH.TIME)  
+
+```
+-!<< CONTINUE FROM HERE--!>>
+ 
+```{r}
+unique(crashes_sample$VEHICLE.TYPE.CODE.1)
+
+
+# VEHICLE.TYPE.CODE.1 into vehicle_type
+crashes <- crash_data %>%
+  mutate(vehicle_type = case_when(
+    str_detect(VEHICLE.TYPE.CODE.1, "(?i)Passenger|Sedan|Van|BUS|Convertible|LIVERY|Chassis Cab") ~ "Passenger Vehicle",
+    str_detect(VEHICLE.TYPE.CODE.1, "(?i)Tow Truck|Box Truck|Dump|COM VEH|Garbage") ~ "Commercial Vehicle",
+    str_detect(VEHICLE.TYPE.CODE.1, "(?i)Taxi|AMBULANCE|usps|TRAILER|Bus|Motorbike|Motorcycle|E-Bike") ~ "Special Purpose Vehicle",
+    TRUE ~ "Unspecified"
+  ))
+
+# CONTRIBUTING.FACTOR.VEHICLE.1 into crash_factor
+crashes <- crashes %>%
+  mutate(crash_factor = case_when(
+    str_detect(CONTRIBUTING.FACTOR.VEHICLE.1, "Turning Improperly|Traffic Control Disregarded|Failure to Keep Right|Failure to Yield Right-of-Way|Following Too Closely|Passing Too Closely") ~ "Poor Driving",
+    
+    str_detect(CONTRIBUTING.FACTOR.VEHICLE.1,"Unsafe Speed|Unsafe Lane Changing|Backing Unsafely|Passing or Lane Usage Improper|Aggressive Driving/Road Rage") ~ "Reckless Driving",
+    
+    str_detect(CONTRIBUTING.FACTOR.VEHICLE.1,"Passenger Distraction|Fell Asleep|Fatigued/Drowsy|Driver Inattention/Distraction|Cell Phone (hand-held)|Driver Inexperience") ~ "Driver's Behavior",
+    
+    str_detect(CONTRIBUTING.FACTOR.VEHICLE.1, "Glare|Traffic Control Device Improper/Non-Working|Obstruction/Debris|Animals Action|Pavement Slippery|View Obstructed/Limited") ~ "Environmental Factors",
+    
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+# Clean data
+crashes <- crashes %>%
+  mutate(casualties = ifelse(NUMBER.OF.PERSONS.KILLED + NUMBER.OF.PERSONS.INJURED > 0, "Yes", "No"),
+         time_of_day = as.character(time_intervals),
+         season = get_season(as.numeric(format(CRASH.DATE, "%m")))) %>%
+  dplyr::select(casualties, season, time_of_day, vehicle_type, crash_factor, LATITUDE, LONGITUDE) %>%
+  filter(complete.cases(.))
+
+glimpse(crashes)
+```
+
+```{r}
+# Training and testing sets
+set.seed(42)
+test_index <- createDataPartition(crashes$casualties, p = 0.20, list = FALSE)
+test_set <- crashes[test_index, ]
+train_set <- crashes[-test_index, ]
+
+train_set <- train_set[complete.cases(train_set),]
+test_set <- test_set[complete.cases(test_set),]
+```
+
+## Exploratory Analysis
+
+### Target Variable: Casualties
+```{r}
+casualties_NYC <- ggplot(crashes, aes(x = casualties, fill = factor(casualties))) +
+  geom_bar() +
+  scale_fill_manual(values = c("lightgreen", "salmon")) + 
+  labs(title = "Casualties", x = "Number of Casualties", y = "Frequency") +
+  theme(axis.text.x = element_blank()) 
+
+casualties_NYC
+
+#ggsave(filename = "casualties_NYC.jpg", plot = casualties_NYC, width = 8, height = 6, units = "in", dpi = 300)
+
+```
+
+### Predictor Variables
+
+```{r}
+# Time of the day
+table(crashes$time_of_day)
+
+time <- ggplot(crashes, aes(x = time_of_day, fill = time_of_day)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Night" = "magenta3", "Morning" = "gold2", "Afternoon" = "tomato2", "WeeHours" = "steelblue3")) +
+  labs(title = "Time of Day", x = "Time of Day", y = "Frequency") +
+  theme(axis.text.x = element_blank()) 
+
+time
+
+#ggsave(filename = "time.jpg", plot = time, width = 8, height = 6, units = "in", dpi = 300)
+
+```
+
+```{r}
+# Season
+table(crashes$season)
+
+season_casualty <- ggplot(crashes, aes(x = season, fill = season)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Fall" = "orangered1", "Spring" = "peachpuff2", "Summer" = "mediumspringgreen", "Winter" = "slategray3")) +
+  labs(title = "Seasons", x = "Seasons", y = "Frequency") +
+  theme(axis.text.x = element_blank()) 
+
+season_casualty
+
+#ggsave(filename = "season_casualty.jpg", plot = season_casualty, width = 8, height = 6, units = "in", dpi = 300)
+
+```
+
+```{r}
+# Vehicule Type
+table(crashes$vehicle_type)
+
+type <- ggplot(crashes, aes(x = vehicle_type, fill = vehicle_type)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Commercial Vehicle" = "cornflowerblue", "Passenger Vehicle" = "sienna1", "Special Purpose Vehicle" = "lightcoral", "Unspecified" = "lightgoldenrod")) +
+  labs(title = "Vehicules Involved in Crashes", x = "Vehicule Type", y = "Frequency") +
+ theme(axis.text.x = element_blank()) 
+
+type
+
+#ggsave(filename = "type.jpg", plot = type, width = 8, height = 6, units = "in", dpi = 300)
+
+```
+
+```{r}
+# Crash Factor
+table(crashes$crash_factor)
+
+factors <- ggplot(crashes, aes(x = crash_factor, fill = crash_factor)) +
+  geom_bar() +
+  scale_fill_manual(values = c("Driver's Behavior" = "cornflowerblue", "Environmental Factors" = "sienna1", "Other" = "lightseagreen", "Poor Driving" = "brown2", "Reckless Driving" = "purple")) +
+  labs(title = "Crash Contributing Factors", x = "Factors", y = "Frequency") +
+   theme(axis.text.x = element_blank()) 
+
+factors
+
+#ggsave(filename = "factors.jpg", plot = factors, width = 8, height = 6, units = "in", dpi = 300)
+
+```
+
+```{r}
+# Location (Latitude, Longitude)
+
+crashes_filtered <- crashes %>%
+  filter(LATITUDE != 0 & LONGITUDE != 0)
+
+location <- ggplot(crashes_filtered, aes(x = LONGITUDE, y = LATITUDE, color = casualties)) +
+  geom_point() +
+  labs(title = "Crash Locations", x = "Longitude", y = "Latitude", color = "Casualties") +
+  scale_color_manual(values = c("Yes" = "indianred", "No" = "royalblue2")) +
+  theme_minimal()
+
+location
+
+#ggsave(filename = "location.jpg", plot = location, width = 8, height = 6, units = "in", dpi = 300)
+```
+
+```{r}
+#Creation of Images
+# combined_plot <- grid.arrange(time, season_casualty, nrow = 2)
+# 
+# combined_plot1 <- grid.arrange(type, factors, nrow = 2)
+# 
+# ggsave(filename = "time_season.jpg", plot = combined_plot, width = 8, height = 6, units = "in", dpi = 300)
+# 
+# ggsave(filename = "type_factor.jpg", plot = combined_plot1, width = 8, height = 6, units = "in", dpi = 300)
+```
+
+
+## Prediction Models
+
+```{r}
+# 4-VARIABLE CLASSIFICATION MODELS
+train_set1 <- train_set %>%
+  dplyr::select(casualties, season, time_of_day, vehicle_type, crash_factor) %>%
+  mutate(season = factor(season),
+         time_of_day = factor(time_of_day),
+         vehicle_type = factor(vehicle_type),
+         crash_factor = factor(crash_factor),
+         casualties = factor(casualties))
+
+train_set1 <- dummy_cols(train_set1, select_columns = c("season", "time_of_day", "vehicle_type", "crash_factor"))
+```
+
+### Model 1: Logistic Regression
+```{r}
+model <- glm(casualties ~ season + time_of_day + vehicle_type + crash_factor, family = "binomial", data = train_set1)
+summary(model)
+
+phat.log <- predict(model, newdata = test_set, type = "response")
+yhat.log <- factor(if_else(phat.log > 0.26,"Yes","No"),levels = c("Yes","No"))
+
+yhat.log <- factor(yhat.log, levels = c("Yes", "No"))
+test_set$casualties <- factor(test_set$casualties, levels = c("Yes", "No"))
+
+# Calculating confusion matrix
+confusion_matrix <- confusionMatrix(yhat.log, test_set$casualties)
+confusion_matrix
+
+# Calculating area under the curve
+roc_curve <- roc(predictor = phat.log, response = as.numeric(test_set$casualties), plot = TRUE, col = "aquamarine4")
+roc_curve
+```
+
+### Model 2: Naive Bayes
+```{r}
+mod.naive <- naiveBayes(casualties ~ ., data = train_set1, laplace = 0.5)
+
+phat.naive <- predict(mod.naive, test_set, type = "raw")
+yhat.naive <- predict(mod.naive, test_set, type = "class")
+
+#area under the curve
+auc <- roc(predictor = phat.naive[,1], response = test_set$casualties, plot = TRUE, col = "firebrick2")
+auc
+
+#confusion matrix
+confusionMatrix(yhat.naive,test_set$casualties)
+```
+
+### Model 3: k-Nearest Neighbors for Classification
+```{r}
+#Train and Test Sets with 6 variables
+train_set_clean <- train_set |>
+  filter(!is.na(LATITUDE) & !is.na(LONGITUDE)) 
+
+train_set_clean <- train_set_clean |>
+  dplyr::select(casualties, LATITUDE, LONGITUDE) |>
+  mutate(casualties = as.factor(casualties))
+
+```
+
+```{r}
+control <- trainControl(method = "cv", number = 10)
+
+knn.class.mod <- train(casualties ~ .,
+                       data = train_set_clean, 
+                       method = "knn",
+                       tuneGrid = data.frame(k = seq(1, 81, 4)),
+                       trControl = control,
+                       na.action = na.omit)
+
+ggplot(knn.class.mod, highlight = TRUE) 
+
+phat.knn.class <- predict(knn.class.mod, newdata = test_set, type = "prob")
+yhat.knn.class <- factor(if_else(phat.knn.class$Yes > 0.26, "Yes", "No"), levels = c("Yes", "No"))
+
+roc(predictor = phat.knn.class$Yes, response = test_set$casualties, plot = TRUE, col = "maroon")
+confusionMatrix(yhat.knn.class, test_set$casualties)
+```
+
+
+
