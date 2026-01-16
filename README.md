@@ -1,4 +1,4 @@
-# Minnesota Fatal Traffic Crash Analysis
+# FARS Minnesota ML Pipeline
 
 End-to-end data engineering and machine learning project analyzing fatal
 traffic crashes in Minnesota.
