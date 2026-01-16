@@ -1,9 +1,3 @@
----
-editor_options: 
-  markdown: 
-    wrap: 72
----
-
 # Minnesota Fatal Traffic Crash Analysis
 
 End-to-end data engineering and machine learning project analyzing fatal
