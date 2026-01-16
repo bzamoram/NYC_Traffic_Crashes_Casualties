@@ -6,7 +6,7 @@ traffic crashes in Minnesota.
 ## 🔗 Live Demo
 
 [**📊 View Full Interactive
-Report**](https://yourusername.github.io/Minnesota-FARS-Analysis)
+Report**](https://bzamoram.github.io/FARS-Minnesota-ML-Pipeline/)
 
 ## 🎯 Project Overview
 
