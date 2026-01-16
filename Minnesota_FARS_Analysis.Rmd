@@ -1,0 +1,390 @@
+---
+title: "Minnesota Fatal Traffic Crash Analysis"
+subtitle: "End-to-End Data Pipeline with Predictive Modeling"
+author: "Bryan Zamora Montero"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: cosmo
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = 'center',
+  cache = FALSE
+)
+
+# Load required packages
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+library(knitr)
+library(kableExtra)
+library(DBI)
+library(RSQLite)
+library(caret)
+
+theme_set(theme_minimal(base_size = 12))
+```
+
+# Executive Summary
+
+This project demonstrates a complete data engineering and data science workflow:
+  - Data Engineering: Automated ETL pipeline extracting data from NHTSA FARS API
+  - Database Management: SQLite database with optimized queries
+  - Feature Engineering: 25+ derived features for predictive modeling
+  - Machine Learning: Multiple algorithms trained and evaluated
+  - Deployment: Production-ready model with API capabilities
+  
+# 1. Data Pipeline Architecture
+
+## 1.1 ETL Process
+
+The data pipeline consists of three main stages implemented in modular R scripts:
+
+**Extract** (`01_extract_data.R`): 
+- Connects to NHTSA FARS API
+- Retrieves Minnesota crash data (State Code: 27)
+- Handles multiple datasets: Accident, Person, Vehicle
+
+**Transform** (`02_transform_data.R`):
+- Data quality validation
+- Feature engineering (temporal, geographic, behavioral)
+- Minnesota-specific features (winter conditions, metro areas)
+
+**Load** (`03_load_data.R`):
+- Writes to SQLite database
+- Creates indexed tables for performance
+- Generates model-ready views
+
+```{r run-etl, eval=FALSE, echo=TRUE}
+# ETL Pipeline (already executed)
+source("src/run_etl_pipeline.R")
+
+# Run complete pipeline
+run_fars_pipeline(from_year = 2015, to_year = 2023)
+```
+
+## 1.2 Database Overview
+
+```{r database load, echo=TRUE, eval=TRUE}
+# Connect to the database created by ETL pipeline
+con <- dbConnect(SQLite(), "data/minnesota_fars.db")
+
+# Get summary statistics
+total_crashes <- dbGetQuery(con, "SELECT COUNT(*) as count FROM fatal_crashes")$count
+total_fatalities <- dbGetQuery(con, "SELECT SUM(total_fatalities) as total FROM fatal_crashes")$total
+year_range <- dbGetQuery(con, "SELECT MIN(crash_year) as min_year, MAX(crash_year) as max_year FROM fatal_crashes")
+
+# Display overview
+data.frame(
+  Metric = c("Total Fatal Crashes", "Total Fatalities", "Year Range", "Average Fatalities per Crash"),
+  Value = c(
+    format(total_crashes, big.mark = ","),
+    format(total_fatalities, big.mark = ","),
+    paste(year_range$min_year, "-", year_range$max_year),
+    round(total_fatalities / total_crashes, 2)
+  )
+) %>% kable(caption = "Minnesota FARS Database Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+# 2. Exploratory Data Analysis
+
+## 2.1 Load Data from Database
+
+```{r querying data from database, echo=TRUE, eval=TRUE}
+# Query data from database
+crash_data <- dbGetQuery(con, "SELECT * FROM fatal_crashes")
+
+cat("Loaded", nrow(crash_data), "crash records\n")
+cat("Features available:", ncol(crash_data), "\n")
+
+# Display sample
+head(crash_data, 10) %>%
+  select(case_id, crash_year, crash_datetime, county, total_fatalities, 
+         winter_crash, alcohol_involved, high_severity) %>%
+  kable(caption = "Sample Crash Records") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## 2.2 Temporal Trends
+
+```{r exploring temporal trends, echo=TRUE, eval=TRUE}
+yearly_stats <- crash_data %>%
+  group_by(crash_year) %>%
+  summarize(
+    crashes = n(),
+    fatalities = sum(total_fatalities),
+    winter_crashes = sum(winter_crash, na.rm = TRUE),
+    alcohol_crashes = sum(alcohol_involved, na.rm = TRUE)
+  )
+
+p1 <- plot_ly(yearly_stats, x = ~crash_year) %>%
+  add_bars(y = ~crashes, name = "Total Crashes", marker = list(color = '#1f77b4')) %>%
+  add_lines(y = ~fatalities, name = "Fatalities", yaxis = "y2", 
+            line = list(color = '#ff7f0e', width = 3)) %>%
+  layout(
+    title = "Minnesota Fatal Crashes: Yearly Trends",
+    xaxis = list(title = "Year"),
+    yaxis = list(title = "Number of Crashes"),
+    yaxis2 = list(title = "Total Fatalities", overlaying = "y", side = "right"),
+    hovermode = "x unified"
+  )
+
+p1
+```
+
+## 2.3 Seasonal Analysis
+
+```{r seasonal analysis, echo=TRUE, eval=TRUE}
+seasonal_stats <- crash_data %>%
+  group_by(season) %>%
+  summarize(
+    crashes = n(),
+    fatalities = sum(total_fatalities),
+    avg_severity = mean(total_fatalities)
+  ) %>%
+  mutate(season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")))
+
+p2 <- plot_ly(seasonal_stats, x = ~season, y = ~crashes, type = 'bar',
+              marker = list(color = c('#3498db', '#2ecc71', '#f39c12', '#e67e22')),
+              text = ~paste("Crashes:", crashes, "<br>Fatalities:", fatalities),
+              hoverinfo = 'text') %>%
+  layout(
+    title = "Fatal Crashes by Season",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Number of Crashes")
+  )
+
+p2
+```
+
+## 2.4 Contributing Factors
+
+```{r contributing factors, echo=TRUE, eval=TRUE}
+factors <- data.frame(
+  Factor = c("Alcohol Involved", "Speed Related", "Dark Conditions", 
+             "Icy Roads", "Adverse Weather", "Work Zone", "Pedestrian Involved"),
+  Count = c(
+    sum(crash_data$alcohol_involved, na.rm = TRUE),
+    sum(crash_data$speed_related, na.rm = TRUE),
+    sum(crash_data$dark_conditions, na.rm = TRUE),
+    sum(crash_data$icy_road, na.rm = TRUE),
+    sum(crash_data$adverse_weather, na.rm = TRUE),
+    sum(crash_data$work_zone, na.rm = TRUE),
+    sum(crash_data$pedestrian_involved, na.rm = TRUE)
+  )
+) %>%
+  mutate(Percentage = round(Count / nrow(crash_data) * 100, 1)) %>%
+  arrange(desc(Count))
+
+p3 <- plot_ly(factors, x = ~Count, y = ~reorder(Factor, Count), 
+              type = 'bar', orientation = 'h',
+              marker = list(color = '#e74c3c'),
+              text = ~paste0(Count, " (", Percentage, "%)"),
+              textposition = 'outside') %>%
+  layout(
+    title = "Contributing Factors in Fatal Crashes",
+    xaxis = list(title = "Number of Crashes"),
+    yaxis = list(title = ""),
+    margin = list(l = 150)
+  )
+
+p3
+```
+
+## 2.5 Geographic Distribution
+
+```{r geographic distribution, echo=TRUE, eval=TRUE}
+# Get crashes with valid coordinates
+map_data <- crash_data %>%
+  filter(!is.na(latitude), !is.na(longitude)) %>%
+  filter(latitude > 43, latitude < 50, longitude > -97, longitude < -89)
+
+# Color by severity
+pal <- colorFactor(
+  palette = c("#FFA500", "#DC143C"),
+  domain = c(FALSE, TRUE)
+)
+
+leaflet(map_data) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addCircleMarkers(
+    lng = ~longitude,
+    lat = ~latitude,
+    radius = ~ifelse(high_severity, 6, 3),
+    color = ~pal(high_severity),
+    fillOpacity = 0.7,
+    stroke = TRUE,
+    weight = 1,
+    popup = ~paste0(
+      "<b>Date:</b> ", crash_datetime, "<br>",
+      "<b>County:</b> ", county, "<br>",
+      "<b>Fatalities:</b> ", total_fatalities, "<br>",
+      "<b>Season:</b> ", season, "<br>",
+      "<b>Weather:</b> ", ifelse(adverse_weather, "Adverse", "Clear"), "<br>",
+      "<b>Alcohol:</b> ", ifelse(alcohol_involved, "Yes", "No")
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = c(FALSE, TRUE),
+    labels = c("Low Severity (1-2 deaths)", "High Severity (3+ deaths)"),
+    title = "Crash Severity"
+  ) %>%
+  setView(lng = -94.5, lat = 46.5, zoom = 7)
+```
+
+Geographic Insights:
+  - Mapped crashes: r format(nrow(map_data), big.mark=",")
+  - High-severity crashes concentrated in metro areas and major highway corridors
+  - Rural areas show different crash patterns
+  
+# 3. Machine Learning Pipeline
+
+## 3.1 Model Training Process
+
+The modeling pipeline was executed using scripts 04-07:
+
+```{r model training process, eval=FALSE, echo=TRUE}
+# Modeling Pipeline (already executed)
+source("src/run_modeling_pipeline.R")
+
+# Run complete modeling
+results <- run_modeling_pipeline()
+```
+
+Training Configuration:
+
+  - Target Variable: high_severity (3+ fatalities)
+  - Train/Test Split: 80/20 stratified
+  - Cross-Validation: 5-fold CV
+  - Algorithms: Logistic Regression, Random Forest, Decision Tree
+  - Evaluation Metric: AUC-ROC
+  
+## 3.2 Model Performance Comparison
+
+```{r comparing model performance, echo=TRUE, eval=TRUE}
+# Load evaluation results from modeling pipeline
+comparison <- read.csv("output/model_comparison.csv")
+
+comparison %>%
+  arrange(desc(AUC)) %>%
+  kable(digits = 4, caption = "Model Performance Comparison") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Best Performing Model: r comparison$Model[1]
+
+  - AUC: r round(comparison$AUC[1], 4)
+  - Accuracy: r round(comparison$Accuracy[1], 4)
+  - F1 Score: r round(comparison$F1_Score[1], 4)
+  
+## 3.3 ROC Curve Analysis
+
+```{r roc curve analysis, echo=TRUE, eval=TRUE}
+knitr::include_graphics("output/evaluation/roc_curves_comparison.png")
+```
+
+## 3.4 Feature Importance
+
+```{r feature importance, echo=TRUE, eval=TRUE}
+# Try to load feature importance plot
+if (file.exists("output/evaluation/feature_importance_rf.png")) {
+  knitr::include_graphics("output/evaluation/feature_importance_rf.png")
+} else {
+  cat("Feature importance visualization not available.")
+}
+```
+
+Top Predictive Features:
+
+  - Number of vehicles involved
+  - Dark lighting conditions
+  - Alcohol involvement
+  - Rural location
+  - Winter weather conditions
+  - Time of day
+  - Speed-related factors
+  
+# 4. Key Insights & Business Impact
+
+## 4.1 Critical Findings
+
+```{r findings, echo=TRUE, eval=TRUE}
+# Calculate key statistics for insights
+winter_impact <- crash_data %>%
+  group_by(winter_crash) %>%
+  summarize(
+    crashes = n(),
+    avg_fatalities = mean(total_fatalities),
+    high_severity_rate = mean(high_severity, na.rm = TRUE)
+  )
+
+# FIXED: Calculate winter increase properly
+if (nrow(winter_impact) == 2) {
+  winter_increase <- round(
+    (winter_impact$high_severity_rate[winter_impact$winter_crash == TRUE] / 
+     winter_impact$high_severity_rate[winter_impact$winter_crash == FALSE] - 1) * 100, 1
+  )
+} else {
+  winter_increase <- 0
+}
+
+alcohol_pct <- round(sum(crash_data$alcohol_involved, na.rm = TRUE) / nrow(crash_data) * 100, 1)
+rural_pct <- round(sum(crash_data$rural_crash, na.rm = TRUE) / nrow(crash_data) * 100, 1)
+metro_crashes <- sum(crash_data$metro_area, na.rm = TRUE)
+```
+
+Finding 1: Winter Weather Impact
+
+  - Winter crashes show r winter_increase% higher rate of multiple fatalities
+  - Snow/ice conditions present in r sum(crash_data$snow_ice_weather, na.rm = TRUE) crashes
+  - Recommendation: Enhanced winter road maintenance and enforcement
+
+Finding 2: Alcohol Involvement
+
+  - r alcohol_pct% of fatal crashes involve alcohol
+  - Concentrated during weekend evening/night hours
+  - Recommendation: Increased DUI checkpoints during high-risk periods
+
+Finding 3: Rural vs Urban Disparities
+
+  - r rural_pct% of crashes occur in rural areas
+  - Rural crashes have higher severity due to speed and response times
+  - Recommendation: Targeted infrastructure improvements on rural corridors
+
+## 4.2 Recommendations for Stakeholders
+
+For Minnesota Department of Transportation:
+
+  - Deploy predictive model for real-time risk assessment
+  - Prioritize high-risk locations identified by the model
+  - Integrate weather data for dynamic risk predictions
+
+For Law Enforcement:
+
+  - Optimize patrol deployment based on temporal patterns
+  - Focus DUI enforcement during identified high-risk periods
+  - Coordinate with DOT on work zone safety
+
+For Vision Zero Initiative:
+
+  - Target interventions at identified hotspots
+  - Use model predictions to measure intervention effectiveness
+  - Develop public awareness campaigns around key risk factors
+  
+  
